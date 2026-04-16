@@ -1,29 +1,24 @@
 import os
+import sys
 import stripe
 
-stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+stripe.api_key = os.environ["SURCHARGE_STRIPE_SECRET_KEY"]
 
 SURCHARGE_PRODUCT_ID = "prod_TwsauvTg8JPMTs"
 SURCHARGE_RATE = 0.03
-DRY_RUN = "--dry-run" in __import__("sys").argv
+DRY_RUN = "--dry-run" in sys.argv
 
-# Cache to avoid creating duplicate surcharge prices in the same run
 price_cache = {}
 
 
 def get_payment_method_type(subscription):
-    """
-    Returns the effective payment method type for a subscription.
-    Checks subscription-level PM first, then falls back to customer-level.
-    Returns 'card', 'us_bank_account', or None if unknown.
-    """
-    # 1. Subscription-level default payment method
     pm_id = subscription.get("default_payment_method")
     if pm_id:
+        if isinstance(pm_id, dict):
+            return pm_id["type"]
         pm = stripe.PaymentMethod.retrieve(pm_id)
         return pm["type"]
 
-    # 2. Customer-level default payment method
     customer = stripe.Customer.retrieve(
         subscription["customer"],
         expand=["invoice_settings.default_payment_method"]
@@ -35,7 +30,6 @@ def get_payment_method_type(subscription):
             return pm["type"]
         return invoice_pm["type"]
 
-    # 3. Legacy default source
     default_source = customer.get("default_source")
     if default_source:
         if isinstance(default_source, str):
@@ -48,9 +42,6 @@ def get_payment_method_type(subscription):
 
 
 def find_surcharge_item(subscription):
-    """
-    Returns the existing surcharge subscription item if one exists, else None.
-    """
     for item in subscription["items"]["data"]:
         price = item["price"] if isinstance(item["price"], dict) else stripe.Price.retrieve(item["price"])
         if price["product"] == SURCHARGE_PRODUCT_ID:
@@ -59,9 +50,6 @@ def find_surcharge_item(subscription):
 
 
 def calculate_surcharge_cents(subscription):
-    """
-    Calculates the 3% surcharge amount in cents based on the subscription total.
-    """
     total = 0
     for item in subscription["items"]["data"]:
         price = item["price"] if isinstance(item["price"], dict) else stripe.Price.retrieve(item["price"])
@@ -72,10 +60,6 @@ def calculate_surcharge_cents(subscription):
 
 
 def get_or_create_surcharge_price(amount_cents, interval):
-    """
-    Returns an existing recurring surcharge price for the given amount,
-    or creates a new one if none exists.
-    """
     cache_key = f"{amount_cents}_{interval}"
     if cache_key in price_cache:
         return price_cache[cache_key]
@@ -125,7 +109,6 @@ def main():
         "errors": [],
     }
 
-    # Paginate through all active subscriptions
     params = {
         "status": "active",
         "limit": 100,
@@ -140,12 +123,10 @@ def main():
             label = f"{sub['id']} (cus: {sub['customer']})"
 
             try:
-                # Skip if surcharge already exists
                 if find_surcharge_item(sub):
                     results["skipped_already_has_surcharge"].append(label)
                     continue
 
-                # Check payment method type
                 pm_type = get_payment_method_type(sub)
 
                 if not pm_type:
@@ -156,13 +137,11 @@ def main():
                     results["skipped_ach"].append(f"{label} [{pm_type}]")
                     continue
 
-                # Calculate surcharge amount
                 surcharge_cents = calculate_surcharge_cents(sub)
                 if surcharge_cents <= 0:
                     results["skipped_zero_amount"].append(label)
                     continue
 
-                # Get billing interval from primary item
                 primary_item = next(
                     (i for i in sub["items"]["data"]
                      if i["price"]["product"] != SURCHARGE_PRODUCT_ID),
@@ -170,10 +149,8 @@ def main():
                 )
                 interval = primary_item["price"].get("recurring", {}).get("interval", "month") if primary_item else "month"
 
-                # Get or create the surcharge price
                 surcharge_price_id = get_or_create_surcharge_price(surcharge_cents, interval)
 
-                # Add surcharge item to subscription
                 if not DRY_RUN:
                     stripe.SubscriptionItem.create(
                         subscription=sub["id"],
@@ -193,7 +170,6 @@ def main():
 
         params["starting_after"] = page["data"][-1]["id"]
 
-    # Print summary
     print("\n" + "=" * 20 + " RESULTS " + "=" * 20)
     print()
     print(f"Total subscriptions processed:  {results['total']}")
