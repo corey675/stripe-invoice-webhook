@@ -12,30 +12,28 @@ price_cache = {}
 
 
 def get_payment_method_type(subscription):
-    """
-    Returns the effective payment method type for a subscription.
-    Checks subscription-level PM first, then falls back to customer-level.
-    Returns 'card', 'us_bank_account', or None if unknown.
-    """
-    # 1. Subscription-level default payment method
-    pm_id = subscription.get("default_payment_method")
-    if pm_id:
-        pm = stripe.PaymentMethod.retrieve(pm_id)
+    pm = subscription.get("default_payment_method")
+    if pm:
+        if isinstance(pm, dict):
+            return pm.get("type")
+        if hasattr(pm, 'type'):
+            return pm.type
+        pm = stripe.PaymentMethod.retrieve(pm)
         return pm["type"]
 
-    # 2. Customer-level default payment method
     customer = stripe.Customer.retrieve(
         subscription["customer"],
         expand=["invoice_settings.default_payment_method"]
     )
     invoice_pm = customer.get("invoice_settings", {}).get("default_payment_method")
     if invoice_pm:
-        if isinstance(invoice_pm, str):
-            pm = stripe.PaymentMethod.retrieve(invoice_pm)
-            return pm["type"]
-        return invoice_pm["type"]
+        if isinstance(invoice_pm, dict):
+            return invoice_pm.get("type")
+        if hasattr(invoice_pm, 'type'):
+            return invoice_pm.type
+        pm = stripe.PaymentMethod.retrieve(invoice_pm)
+        return pm["type"]
 
-    # 3. Legacy default source
     default_source = customer.get("default_source")
     if default_source:
         if isinstance(default_source, str):
