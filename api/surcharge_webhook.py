@@ -283,13 +283,26 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(content_length)
-        sig_header = self.headers.get("stripe-signature")
+
+        # Vercel may lowercase headers — check both variants
+        sig_header = (
+            self.headers.get("stripe-signature")
+            or self.headers.get("Stripe-Signature")
+        )
+
+        if not sig_header:
+            print("ERROR: No stripe-signature header found")
+            print(f"Available headers: {dict(self.headers)}")
+            self._respond(400, {"error": "Missing stripe-signature header"})
+            return
 
         try:
             event = stripe.Webhook.construct_event(
                 raw_body, sig_header, WEBHOOK_SECRET
             )
         except stripe.error.SignatureVerificationError as e:
+            print(f"ERROR: Signature verification failed: {e}")
+            print(f"Webhook secret starts with: {WEBHOOK_SECRET[:10]}...")
             self._respond(400, {"error": str(e)})
             return
 
