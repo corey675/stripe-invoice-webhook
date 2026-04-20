@@ -93,12 +93,13 @@ def get_or_create_surcharge_price(amount_cents, interval):
         price_cache[cache_key] = placeholder
         return placeholder
 
-    new_price = stripe.Price.create(
+new_price = stripe.Price.create(
         product=SURCHARGE_PRODUCT_ID,
         unit_amount=amount_cents,
         currency="usd",
         recurring={"interval": interval},
         nickname=f"CC Surcharge ${amount_cents / 100:.2f}/{interval}",
+        tax_behavior="exclusive",
     )
     price_cache[cache_key] = new_price["id"]
     return new_price["id"]
