@@ -10,8 +10,17 @@ SURCHARGE_PRODUCT_ID = os.environ.get("SURCHARGE_PRODUCT_ID", "prod_TwsauvTg8JPM
 SURCHARGE_RATE = 0.03
 
 
+def sget(obj, key, default=None):
+    """Safe get that works on both dicts and StripeObjects."""
+    try:
+        val = obj[key]
+        return val if val is not None else default
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def get_payment_method_type(subscription):
-    pm_id = subscription.get("default_payment_method")
+    pm_id = sget(subscription, "default_payment_method")
     if pm_id:
         if isinstance(pm_id, dict):
             return pm_id["type"]
@@ -21,13 +30,14 @@ def get_payment_method_type(subscription):
         subscription["customer"],
         expand=["invoice_settings.default_payment_method"]
     )
-    invoice_pm = customer.get("invoice_settings", {}).get("default_payment_method")
+    invoice_settings = sget(customer, "invoice_settings") or {}
+    invoice_pm = sget(invoice_settings, "default_payment_method")
     if invoice_pm:
         if isinstance(invoice_pm, str):
             pm = stripe.PaymentMethod.retrieve(invoice_pm)
             return pm["type"]
         return invoice_pm["type"]
-    default_source = customer.get("default_source")
+    default_source = sget(customer, "default_source")
     if default_source:
         if isinstance(default_source, str):
             source = stripe.Customer.retrieve_source(customer["id"], default_source)
@@ -51,16 +61,19 @@ def calculate_surcharge_cents(subscription):
         price = item["price"] if isinstance(item["price"], dict) else stripe.Price.retrieve(item["price"])
         if price["product"] == SURCHARGE_PRODUCT_ID:
             continue
-        total += (price.get("unit_amount") or 0) * (item.get("quantity") or 1)
+        unit_amount = sget(price, "unit_amount") or 0
+        quantity = sget(item, "quantity") or 1
+        total += unit_amount * quantity
     return round(total * SURCHARGE_RATE)
 
 
 def get_or_create_surcharge_price(amount_cents, interval):
     existing = stripe.Price.list(product=SURCHARGE_PRODUCT_ID, active=True, limit=100)
     for p in existing["data"]:
+        recurring = sget(p, "recurring") or {}
         if (
             p["unit_amount"] == amount_cents
-            and p.get("recurring", {}).get("interval") == interval
+            and sget(recurring, "interval") == interval
             and p["currency"] == "usd"
         ):
             return p["id"]
@@ -96,7 +109,11 @@ def add_surcharge_to_subscription(sub):
         (i for i in sub["items"]["data"] if i["price"]["product"] != SURCHARGE_PRODUCT_ID),
         None
     )
-    interval = primary_item["price"].get("recurring", {}).get("interval", "month") if primary_item else "month"
+    if primary_item:
+        recurring = sget(primary_item["price"], "recurring") or {}
+        interval = sget(recurring, "interval") or "month"
+    else:
+        interval = "month"
     price_id = get_or_create_surcharge_price(surcharge_cents, interval)
     stripe.SubscriptionItem.create(
         subscription=sub["id"],
@@ -117,7 +134,6 @@ def recalculate_surcharge(sub):
 
 def handle_subscription_updated(event):
     new_sub = event["data"]["object"]
-    # Use key access instead of .get() — StripeObject doesn't support .get() on event["data"]
     try:
         raw_previous = event["data"]["previous_attributes"]
         previous = dict(raw_previous) if raw_previous else {}
@@ -128,18 +144,17 @@ def handle_subscription_updated(event):
     sub = stripe.Subscription.retrieve(new_sub["id"], expand=["items.data.price"])
     pm_type = get_payment_method_type(sub)
 
-    # Check if payment method changed
     pm_changed = "default_payment_method" in previous
 
     # Check if any NON-surcharge item changed
     items_changed = False
     if "items" in previous:
-        raw_items = previous.get("items")
+        raw_items = previous.get("items") if hasattr(previous, 'get') else previous["items"]
         if raw_items is not None:
             try:
-                items_data = list(raw_items.get("data", []))
+                items_data = list(raw_items["data"])
             except Exception:
-                items_data = list(raw_items) if raw_items else []
+                items_data = []
 
             for item in items_data:
                 try:
@@ -157,13 +172,11 @@ def handle_subscription_updated(event):
             add_surcharge_to_subscription(sub)
         else:
             remove_surcharge_from_subscription(sub)
-
     elif items_changed:
         if pm_type == "card":
             recalculate_surcharge(sub)
         else:
             print(f"[{sub['id']}] Items changed but not on card — no action needed")
-
     else:
         print(f"[{sub['id']}] No relevant changes — ignoring")
 
@@ -175,6 +188,7 @@ def handle_customer_updated(event):
         previous = dict(raw_previous) if raw_previous else {}
     except (KeyError, AttributeError):
         previous = {}
+
     if "invoice_settings" not in previous and "default_source" not in previous:
         print(f"[cus: {customer['id']}] No PM change — ignoring.")
         return
@@ -183,7 +197,7 @@ def handle_customer_updated(event):
         expand=["data.items.data.price"]
     )
     for sub in subscriptions["data"]:
-        if sub.get("default_payment_method"):
+        if sget(sub, "default_payment_method"):
             print(f"[{sub['id']}] Has own PM — skipping.")
             continue
         pm_type = get_payment_method_type(sub)
@@ -196,13 +210,13 @@ def handle_customer_updated(event):
 
 def handle_invoice_created(invoice):
     invoice_id = invoice["id"]
-    sub_id = invoice.get("subscription")
+    sub_id = sget(invoice, "subscription")
 
     if not sub_id:
         print(f"Skipping {invoice_id} — not a subscription invoice")
         return
 
-    if invoice.get("collection_method") != "charge_automatically":
+    if sget(invoice, "collection_method") != "charge_automatically":
         print(f"Skipping {invoice_id} — not autopay")
         return
 
@@ -215,7 +229,7 @@ def handle_invoice_created(invoice):
         return
 
     if invoice["status"] == "draft":
-        post_tax_total = invoice.get("total", 0)
+        post_tax_total = sget(invoice, "total") or 0
         if post_tax_total <= 0:
             print(f"Skipping {invoice_id} — zero total")
             return
@@ -226,7 +240,7 @@ def handle_invoice_created(invoice):
                 customer=invoice["customer"],
                 invoice=invoice_id,
                 amount=surcharge_amount,
-                currency=invoice.get("currency", "usd"),
+                currency=sget(invoice, "currency") or "usd",
                 description="Credit Card Processing Fee (3%)",
                 metadata={"surcharge": "true"}
             )
